@@ -11,6 +11,8 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
+
 from typing import Literal
 
 from google.genai import types
@@ -55,7 +57,20 @@ def detect_injection(user_input: str) -> InputStatus:
         # TODO: Add at least 5 regex patterns
         # Example:
         # r"ignore (all )?(previous|above) instructions",
+        r"\bignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions?\b",
+        r"\byou\s+are\s+now\b",
+        r"\bsystem\s+prompt\b",
+        r"\breveal\s+(?:your\s+)?(?:instructions?|prompt)\b",
+        r"\bpretend\s+(?:you\s+are|to\s+be)\b",
+        r"\bact\s+as\s+(?:a\s+|an\s+)?unrestricted\b",
+        r"\b(?:disregard|forget|override)\s+(?:all\s+)?(?:previous|above|prior|your)?\s*(?:instructions?|rules?|prompt)\b",
+        r"\b(?:disable|bypass|ignore)\s+(?:all\s+)?(?:safety|security|guardrails?)\b",
     ]
+
+    # Handle unicode
+    user_input = user_input.lower()
+    user_input = unicodedata.normalize("NFKC", user_input)
+    user_input = re.sub(r"[\u200B\u200C\u200D\u2060\uFEFF]", "", user_input)
 
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, user_input, re.IGNORECASE):
@@ -86,12 +101,11 @@ def topic_filter(user_input: str) -> InputStatus:
     """
     input_lower = user_input.lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
-
-    pass  # Replace with your implementation
+    if any(topic in input_lower for topic in BLOCKED_TOPICS):
+        return "BLOCK"
+    if any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return "ALLOW"
+    return "BLOCK"
 
 
 # ============================================================
@@ -151,7 +165,26 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         #    - If "BLOCK": increment blocked_count, return self._block_response("...")
         # 3. If both return "ALLOW": return None (let message through)
 
-        pass  # Replace with your implementation
+        injection_status = detect_injection(text)
+        topic_status = topic_filter(text)
+
+        if injection_status == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Your message was blocked due to potential prompt injection."
+            )
+
+        if topic_status == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Your message was blocked because it is off-topic or contains disallowed content."
+            )
+
+        else:
+            return None  
+
+
+        
 
 
 # ============================================================

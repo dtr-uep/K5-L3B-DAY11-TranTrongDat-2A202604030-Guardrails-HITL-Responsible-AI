@@ -41,12 +41,33 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        # Domestic/international mobile and landline forms, with separators.
+        "VN phone number": (
+            r"(?<![\w+])(?:0|(?:\+84|0084)[ .-]?(?:\(0\)[ .-]?)?)"
+            r"(?:[35789](?:[ .-]?[0-9]){8}|2(?:[ .-]?[0-9]){9})(?!\w)"
+        ),
+        "Email": (
+            r"(?<![\w.!#$%&'*+/=?^`{|}~@-])"
+            r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
+            r"(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
+            r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?![\w@-])"
+        ),
+        # Nine/twelve ASCII digits, optionally separated into groups of three.
+        "National ID (CMND/CCCD)": (
+            r"(?<!\w)[0-9]{3}(?:[ .-]?[0-9]{3}){2,3}(?!\w)"
+        ),
+        "API key pattern": (
+            r"(?<![\w-])sk-[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\w-])"
+        ),
+        "Database host": r"\bdb\.vinbank\.internal(?::[0-9]+)?\b",
+        "Protected password": r"\badmin123\b",
+        # Match assignments, JSON fields, and prose; quoted secrets may contain spaces.
+        "Password pattern": (
+            r"\b(?:password|passwd|pwd|passphrase)\b[\"']?\s*"
+            r"(?:[:=]|\bis\b)\s*"
+            r'''(?:"(?:\\[^\r\n]|[^"\\\r\n])+"|'(?:\\[^\r\n]|[^'\\\r\n])+'|[^\s"',;<>`]+)'''
+        ),
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -149,6 +170,8 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         self.blocked_count = 0
         self.redacted_count = 0
         self.total_count = 0
+        self.judge_checks = 0
+        self.judge_fails = 0
 
     def _extract_text(self, llm_response) -> str:
         """Extract text from LLM response."""
@@ -180,6 +203,29 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         #    - If unsafe: replace llm_response.content with a safe message
         #    - Increment self.blocked_count
         # 3. Return llm_response (possibly modified)
+
+        check_content_filter = content_filter(response_text)
+        if len(check_content_filter["issues"]) > 0:
+            self.redacted_count += 1
+            redacted_text = check_content_filter["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=redacted_text)],
+            )
+
+
+        if self.use_llm_judge:
+            self.judge_checks += 1
+            verdict = await llm_safety_check(self._extract_text(llm_response))
+            if not verdict["safe"]:
+                self.judge_fails += 1
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text="I cannot provide that response. Please ask a banking question."
+                    )],
+                )
 
         return llm_response  # TODO: modify if needed
 
